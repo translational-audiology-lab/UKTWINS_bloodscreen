@@ -1,0 +1,295 @@
+####### Cytokine analysis for tinnitus
+library(lme4)
+library(lmerTest)
+library(readxl)
+
+#### Loading and merging data
+sample<-as.data.frame(read_excel("Manifest for Randomisation_20012021_corrected.xlsx"))
+covs<-read.csv("TUK/Covariates_HL.Smoking.csv")
+sample<-merge(sample,covs,by.x="STUDY_NO",by.y="ID")
+
+dset<-read.csv("20201857_Freydin_NPX.csv")
+dset<-merge(sample,dset,by.x="LAB_NO",by.y="LabID") # 1469
+
+#### Removing redundant columns and samples
+dset<-dset[dset$QC_Warning=="Pass",] # 1458
+dset$QC_Warning<-dset$PlateID<-dset$BRIDGE<-dset$Box<-dset$Location<-NULL
+dset$Spec_Date<-as.numeric(substring(dset$Spec_Date,1,4))
+
+dset<-dset[dset$Spec_Date!=2018,] # 1445
+
+#### Analysis 
+outAll.All<-as.data.frame(do.call(rbind,lapply(dset[,11:ncol(dset)],
+                                        function(cytokine) {
+                                          fit<-lmer(cytokine~DS+AGE+SEX+BMI+HL+SMOK+(1|FID)+(1|Spec_Date)+(1|STUDY_NO),data=dset)
+                                          s<-summary(fit)
+                                          c(s$devcomp$dims[1],s$coef[2,])
+                                        }
+)))
+
+colnames(outAll.All)[ncol(outAll.All)]<-"P"
+outAll.All$LOD<-unlist(lod[2,])
+outAll.All<-outAll.All[order(outAll.All$P),]
+
+### Discordant twins 
+pairsS<-table(dsetS$FID)
+pairsO<-table(dsetO$FID)
+pairsN<-table(dsetN$FID)
+
+tS<-dsetS[dsetS$FID%in%names(pairsS)[pairsS==2],] # 200
+tO<-dsetO[dsetO$FID%in%names(pairsO)[pairsO==2],] # 352
+tN<-dsetN[dsetN$FID%in%names(pairsN)[pairsN==2],] # 352
+
+tS<-tS[order(tS$STUDY_NO),]
+tO<-tO[order(tO$STUDY_NO),]
+tN<-tN[order(tN$STUDY_NO),]
+
+tS1<-tS[tS$STUDY_NO%%2==0,]
+tS2<-tS[tS$STUDY_NO%%2!=0,]
+
+tO1<-tO[tO$STUDY_NO%%2==0,]
+tO2<-tO[tO$STUDY_NO%%2!=0,]
+
+tN1<-tN[tN$STUDY_NO%%2==0,]
+tN2<-tN[tN$STUDY_NO%%2!=0,]
+
+t1<-rbind(tS1,tO1,tN1) # 452
+t2<-rbind(tS2,tO2,tN2) # 452
+
+w<-which(t1$DS!=t2$DS) # 271
+
+LS<-list()
+for(i in 11:ncol(t1)) {
+  tmp<-data.frame(ds=c(t1$DS[w],t2$DS[w]),
+                  cytokine=c(t1[w,i],t2[w,i]),
+                  age=c(t1$AGE[w],t2$AGE[w]),
+                  sex=c(t1$SEX[w],t2$SEX[w]),
+                  bmi=c(t1$BMI[w],t2$BMI[w]),
+                  fid=c(t1$FID[w],t2$FID[w]),
+                  spec=c(t1$Spec_Date[w],t2$Spec_Date[w]),
+                  id<-c(t1$STUDY_NO[w],t2$STUDY_NO[w]),
+                  hl=c(t1$HL[w],t2$HL[w]),
+                  smok=c(t1$SMOK[w],t2$SMOK[w]),
+                  twin=c(1:length(w),1:length(w)))
+  
+  fit<-lmer(cytokine~ds+age+sex+bmi+hl+smok+(1|fid)+(1|spec)+(1|twin),data=tmp)
+  s<-summary(fit)
+  LS[[i]]<-c(s$devcomp$dims[1],s$coef[2,])
+}
+
+outAll.Disc<-as.data.frame(do.call(rbind,LS))
+rownames(outAll.Disc)<-colnames(t1)[11:ncol(t1)]
+colnames(outAll.Disc)[ncol(outAll.Disc)]<-"P"
+outAll.Disc$LOD<-unlist(lod[2,])
+outAll.Disc<-outAll.Disc[order(outAll.Disc$P),]
+
+#### Saving
+write.csv(outAll.All,file="TUK/outAll.All_29072021.csv")
+write.csv(outAll.Disc,file="TUK/outAll.Disc_29072021.csv")
+
+#### Meta-analysis with KI
+library(metafor)
+
+All<-read.csv("outAll.All_29072021.csv")
+Twins<-read.csv("outAll.Disc_29072021.csv")
+KI<-read.csv("KI.csv")
+
+KI$Protein<-gsub(" ",".",KI$Protein)
+KI$Protein<-gsub("-",".",KI$Protein)
+KI$Protein[KI$Protein%in%"4E.BP1"]<-"X4E.BP1"
+
+KI<-KI[KI$Protein%in%All$Protein,]
+All<-All[All$Protein%in%KI$Protein,]
+Twins<-Twins[Twins$Protein%in%KI$Protein,]
+lod<-lod[,colnames(lod)%in%KI$Protein]
+
+# fixed effects
+resAll<-resTwins<-list()
+
+for(p in KI$Protein) {
+  ki<-KI[KI$Protein%in%p,]
+  all<-All[All$Protein%in%p,]
+  twins<-Twins[Twins$Protein%in%p,]
+  resAll[[which(KI$Protein%in%p)]]<-rma(yi=c(ki$Estimate,all$Estimate),sei=c(ki$Std..Error,all$Std..Error),method="FE")
+  resTwins[[which(KI$Protein%in%p)]]<-rma(yi=c(ki$Estimate,twins$Estimate),sei=c(ki$Std..Error,twins$Std..Error),method="FE")
+}
+
+outAll<-round(do.call(rbind,lapply(resAll, function(x)data.frame(Effect=x$beta,SE=x$se,Z=x$zval,P=x$pval,I2=x$I2,Q=x$QE,Qp=x$QEp))),3)
+outTwins<-round(do.call(rbind,lapply(resTwins, function(x)data.frame(Effect=x$beta,SE=x$se,Z=x$zval,P=x$pval,I2=x$I2,Q=x$QE,Qp=x$QEp))),3)
+rownames(outAll)<-rownames(outTwins)<-KI$Protein
+outAll$LOD<-outTwins$LOD<-unlist(lod[2,])
+write.csv(outAll,file="MA_FE_All.csv")
+write.csv(outTwins,file="MA_FE_Disc.csv")
+
+
+#### Regression data, adjusting
+All<-read.csv("MA/outAll.All_29072021.csv")
+Disc<-read.csv("MA/outAll.Disc_29072021.csv")
+KI<-read.csv("MA/KI.csv")
+KI$Protein<-gsub(" ",".",KI$Protein)
+KI$Protein<-gsub("-",".",KI$Protein)
+KI$Protein[KI$Protein%in%"4E.BP1"]<-"X4E.BP1"
+
+All$LOD<-as.numeric(sub("%","",All$LOD))
+w<-which(All$LOD>50 & !All$Protein%in%KI$Protein)
+All<-All[-w,]
+Disc<-Disc[Disc$Protein%in%All$Protein,]
+
+All$FDR<-p.adjust(All$P,"fdr")
+Disc$FDR<-p.adjust(Disc$P,"fdr")
+
+maAll<-read.csv("MA/MA_FE_All.csv")
+maAll$FDR<-p.adjust(maAll$P,"fdr")
+
+maDisc<-read.csv("MA/MA_FE_Disc.csv")
+maDisc$FDR<-p.adjust(maDisc$P,"fdr")
+
+
+write.csv(All,file="MA/Paper/All_adjusted.csv")
+write.csv(Disc,file="MA/Paper/Discordant_adjusted.csv")
+write.csv(maAll,file="MA/Paper/MA_with_All.csv")
+write.csv(maDisc,file="MA/Paper/MA_with_Discordant.csv")
+
+##### Elastic net regression
+
+library(glmnet)
+library(pROC)
+library(epiR)
+library(readxl)
+
+ki<-read.csv("Copy of exported_clean_data-MF.csv",stringsAsFactors=F)
+ki<-ki[,c(2:ncol(ki),1)]
+
+## NPX ~ Tinnitus + Age + Sex + BMI + `Sample Lab` + Smoking + TSCHQ_26
+ki[ki==""]<-NA
+ki.adj<-ki
+
+for(i in 1:68) {
+  cyto<-ki.adj[,i]
+  fit<-glm(cyto~SamplingAge+SampleLab+Sex+Smoking+BMI,data=ki.adj,na.action=na.exclude)
+  ki.adj[,i]<-resid(fit)
+  }
+  
+
+ki.adj$Tinnitus<-ifelse(ki.adj$Tinnitus=="No",0,1)
+
+Y<-ki.adj$Tinnitus
+X<-as.matrix(ki.adj[,1:68])
+dset<-na.omit(cbind(ki.adj$Tinnitus,as.matrix(ki.adj[,1:68])))
+Y<-dset[,1]
+X<-dset[,2:ncol(dset)]
+
+# find best lambda
+set.seed(1234)
+cv <- cv.glmnet(X, Y, alpha = 0.5,family="binomial")
+#best_lambda <- cv_model$lambda.min
+#best_lambda
+
+# fit model
+fitL <- glmnet(X, Y, alpha = 0.5, family = "binomial", lambda = cv$lambda.min)
+#coef(fitL)
+
+pred<-as.numeric(predict(fitL,type="response",newx=X))
+prob=0.5
+
+df<-data.frame(pred,tinn=Y)
+df$pred<-ifelse(df$pred>prob,1,0)
+
+tp<-sum(df$tinn==1&df$pred==1,na.rm=T)
+tn<-sum(df$tinn==0&df$pred==0,na.rm=T)
+fp<-sum(df$tinn==0&df$pred==1,na.rm=T)
+fn<-sum(df$tinn==1&df$pred==0,na.rm=T)
+
+M<-matrix(c(tp,fn,fp,tn),2,2)
+
+epi.tests(M)
+
+## AUC
+robj.test <- roc(df$tinn,df$pred,
+                 smoothed = TRUE,
+                 # arguments for ci
+                 ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+                 # arguments for plot
+                 plot=F, auc.polygon=T, max.auc.polygon=T, grid=F,
+                 print.auc=T, show.thres=T)
+
+auc(robj.test) # 0.5847
+
+ci.auc(robj.test)
+
+plot(robj.test,main="KI sample")
+sens.ci <- ci.se(robj.test)
+plot(sens.ci, type="shape", col="lightblue")
+
+### Now apply model to Twins
+sample<-as.data.frame(read_excel("../../Manifest for Randomisation_20012021_corrected.xlsx"))
+covs<-read.csv("../../TUK/Covariates_HL.Smoking.csv")
+sample<-merge(sample,covs,by.x="STUDY_NO",by.y="ID")
+twins<-as.data.frame(read_excel("C:/Users/mbf19/Desktop/TwinDetails_28.10.2021.xlsx",sheet=1))
+sample<-merge(sample,twins[,c(2,4)],by="STUDY_NO")
+sample$SamplingAge<-as.numeric(substr(sample$Spec_Date,1,4))-sample$YearOfBirth
+
+dset<-read.csv("../../20201857_Freydin_NPX.csv")
+dset<-merge(sample,dset,by.x="LAB_NO",by.y="LabID") # 1469
+
+dset<-dset[dset$QC_Warning=="Pass",] # 1458
+dset$QC_Warning<-dset$PlateID<-dset$BRIDGE<-dset$Box<-dset$Location<-NULL
+dset$Spec_Date<-as.numeric(substring(dset$Spec_Date,1,4))
+
+dset<-dset[dset$Spec_Date!=2018,] #
+
+for(i in 13:ncol(dset)) {
+  cyto<-dset[,i]
+  fit<-glm(cyto~SamplingAge+SEX+SMOK+BMI,data=dset,na.action=na.exclude)
+  dset[,i]<-resid(fit)
+}
+
+### Take median value
+mysplit<-function(df){
+  df<-df[order(df$STUDY_NO),]
+  ids <- split(1:nrow(df), df$STUDY_NO, drop = T)
+  res <- lapply(ids, function(id) df[id,])
+  res
+}
+
+M<-mysplit(dset)
+
+tuk<-do.call(rbind,lapply(M,function(m)apply(m[,13:ncol(m)], 2, median, na.rm=T))) # 886
+
+dset<-dset[-which(duplicated(dset$STUDY_NO)),]
+
+tuk<-tuk[,colnames(tuk)%in%colnames(X)]
+
+pred<-as.numeric(predict(fitL,type="response",newx=as.matrix(tuk)))
+prob=0.5
+
+df<-data.frame(pred,tinn=dset$DS)
+df$pred<-ifelse(df$pred>prob,1,0)
+
+tp<-sum(df$tinn==1&df$pred==1,na.rm=T)
+tn<-sum(df$tinn==0&df$pred==0,na.rm=T)
+fp<-sum(df$tinn==0&df$pred==1,na.rm=T)
+fn<-sum(df$tinn==1&df$pred==0,na.rm=T)
+
+M<-matrix(c(tp,fn,fp,tn),2,2)
+
+epi.tests(M)
+
+## AUC
+robj.test <- roc(df$tinn,df$pred,
+                 smoothed = TRUE,
+                 # arguments for ci
+                 ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+                 # arguments for plot
+                 plot=F, auc.polygon=T, max.auc.polygon=T, grid=F,
+                 print.auc=T, show.thres=T)
+
+auc(robj.test) # 0.5208
+
+ci.auc(robj.test)
+
+plot(robj.test,main="TUK sample")
+sens.ci <- ci.se(robj.test)
+plot(sens.ci, type="shape", col="lightblue")
+
+### End of script
